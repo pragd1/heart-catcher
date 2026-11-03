@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Heart Catcher</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root { --pink: #d63384; --bg1: #ffeef8; --bg2: #ffd3eb; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; touch-action: none; user-select: none;
+    background: linear-gradient(160deg, var(--bg1), var(--bg2));
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #5a1a3a;
+  }
+  #hud {
+    position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between;
+    padding: 12px 16px; font-size: 20px; font-weight: 700; color: var(--pink); pointer-events: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  .panel {
+    position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; text-align: center; padding: 24px; background: rgba(255, 238, 248, .92);
+  }
+  .panel h1 { color: var(--pink); margin: 0 0 8px; font-size: 32px; }
+  .panel p { margin: 6px 0; font-size: 17px; line-height: 1.4; max-width: 340px; }
+  .big { font-size: 64px; font-weight: 800; color: var(--pink); }
+  button {
+    margin-top: 18px; background: var(--pink); color: #fff; border: 0; border-radius: 12px;
+    padding: 14px 28px; font-size: 19px; font-weight: 700;
+  }
+  .hidden { display: none; }
+  .legend span { white-space: nowrap; margin: 0 6px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><span>❤️ <span id="score">0</span></span><span id="lives"></span><span>⏱ <span id="time">60</span></span></div>
+
+<div id="start" class="panel">
+  <h1>Heart Catcher</h1>
+  <p id="mode-line"></p>
+  <p>Slide to move the basket. 60 seconds, 3 lives.</p>
+  <p class="legend"><span>❤️ +1</span><span>💛 +3</span><span>💔 lose a life</span></p>
+  <p>Missing a ❤️ or 💛 also costs a life.</p>
+  <button id="start-btn">Start</button>
+</div>
+
+<div id="countdown" class="panel hidden"><div class="big" id="count">3</div></div>
+
+<div id="over" class="panel hidden">
+  <h1 id="over-title">Time's up!</h1>
+  <div class="big" id="final">0</div>
+  <p id="over-detail"></p>
+  <button id="send-btn" class="hidden">Send score</button>
+  <button id="again-btn" class="hidden">Play again</button>
+</div>
+
+<script>
+// ---- Telegram + mode -------------------------------------------------------
+const tg = window.Telegram && window.Telegram.WebApp;
+const inTelegram = !!(tg && tg.initData);
+if (tg) {
+  tg.ready();
+  tg.expand();
+  if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();  // swiping down must not close the game mid-round
+}
+const params = new URLSearchParams(location.search);
+const duelId = params.get("duel");
+// In a duel both players get the same seed, so the same hearts fall at the same moments.
+const seed = parseInt(params.get("seed"), 10) || Math.floor(Math.random() * 2 ** 31);
+document.getElementById("mode-line").textContent = duelId
+  ? "Duel! Your partner gets exactly the same hearts. One try only."
+  : "Practice round.";
+
+function haptic(kind) {
+  if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred(kind);
+}
+
+// ---- Seeded level ----------------------------------------------------------
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const ROUND_SECONDS = 60;
+const LIVES = 3;
+
+// The whole round is generated up front from the seed. Everything is in screen-relative
+// units (x as a fraction of width, speed in screen-heights per second) and depends only on
+// time, never on how well you play - so both players face an identical round.
+function buildLevel(seed) {
+  const rnd = mulberry32(seed);
+  const hearts = [];
+  let t = 0.6;
+  while (t < ROUND_SECONDS) {
+    const p = t / ROUND_SECONDS;                     // 0 -> 1 over the round
+    const roll = rnd();
+    const kind = roll < 0.12 ? "gold" : roll < 0.12 + 0.1 + 0.12 * p ? "broken" : "red";
+    hearts.push({
+      t,
+      kind,
+      x: 0.08 + rnd() * 0.84,
+      speed: (0.28 + rnd() * 0.18) * (1 + 1.1 * p) * (kind === "gold" ? 1.25 : 1),
+    });
+    t += (0.95 - 0.55 * p) * (0.7 + rnd() * 0.6);    // spawn gap shrinks as the round goes on
+  }
+  return hearts;
+}
+
+// ---- Canvas ----------------------------------------------------------------
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0;
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener("resize", resize);
+resize();
+
+const BASKET_W = 0.24;   // fraction of screen width
+const COLORS = { red: "#ff4d6d", gold: "#ffb703", broken: "#6c757d" };
+
+function drawHeart(x, y, s, color, cracked) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x, y + s * 0.3);
+  ctx.bezierCurveTo(x, y, x - s, y, x - s, y + s * 0.35);
+  ctx.bezierCurveTo(x - s, y + s * 0.8, x - s * 0.2, y + s * 1.1, x, y + s * 1.4);
+  ctx.bezierCurveTo(x + s * 0.2, y + s * 1.1, x + s, y + s * 0.8, x + s, y + s * 0.35);
+  ctx.bezierCurveTo(x + s, y, x, y, x, y + s * 0.3);
+  ctx.fill();
+  if (cracked) {
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(x, y + s * 0.3); ctx.lineTo(x - s * 0.25, y + s * 0.7);
+    ctx.lineTo(x + s * 0.15, y + s * 0.9); ctx.lineTo(x, y + s * 1.3);
+    ctx.stroke();
+  }
+}
+
+// ---- Game state ------------------------------------------------------------
+let level, next, active, score, lives, caught, startAt, basketX, running, lastTs;
+
+function reset() {
+  level = buildLevel(seed);
+  next = 0; active = []; score = 0; lives = LIVES; caught = 0;
+  basketX = 0.5;
+  updateHud(0);
+}
+
+function updateHud(elapsed) {
+  document.getElementById("score").textContent = score;
+  document.getElementById("lives").textContent = "💗".repeat(lives) + "🤍".repeat(LIVES - lives);
+  document.getElementById("time").textContent = Math.max(0, Math.ceil(ROUND_SECONDS - elapsed));
+}
+
+function moveTo(clientX) {
+  basketX = Math.min(1 - BASKET_W / 2, Math.max(BASKET_W / 2, clientX / W));
+}
+window.addEventListener("pointermove", (e) => { if (running) moveTo(e.clientX); });
+window.addEventListener("pointerdown", (e) => { if (running) moveTo(e.clientX); });
+
+function loseLife() {
+  lives -= 1;
+  haptic("heavy");
+  if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
+}
+
+function frame(ts) {
+  if (!running) return;
+  const elapsed = (ts - startAt) / 1000;
+
+  while (next < level.length && level[next].t <= elapsed) active.push({ ...level[next++] });
+
+  const size = Math.max(16, W * 0.055);
+  const basketY = H - 70, basketH = 18;
+  const bx = basketX * W, bw = BASKET_W * W;
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#d63384";
+  ctx.beginPath();
+  ctx.roundRect(bx - bw / 2, basketY, bw, basketH, 9);
+  ctx.fill();
+
+  for (let i = active.length - 1; i >= 0; i--) {
+    const h = active[i];
+    const y = (elapsed - h.t) * h.speed * H - size * 1.4;   // position from time, not frame count
+    const x = h.x * W;
+    if (y + size * 1.4 >= basketY && y < basketY + basketH && Math.abs(x - bx) <= bw / 2 + size * 0.5) {
+      active.splice(i, 1);
+      if (h.kind === "broken") loseLife();
+      else { score += h.kind === "gold" ? 3 : 1; caught += 1; haptic("light"); }
+      continue;
+    }
+    if (y > H) {
+      active.splice(i, 1);
+      if (h.kind !== "broken") loseLife();
+      continue;
+    }
+    drawHeart(x, y, size, COLORS[h.kind], h.kind === "broken");
+  }
+
+  updateHud(elapsed);
+  if (lives <= 0 || elapsed >= ROUND_SECONDS) return endRound(elapsed);
+  requestAnimationFrame(frame);
+}
+
+function endRound(elapsed) {
+  running = false;
+  const survived = Math.min(ROUND_SECONDS, Math.round(elapsed));
+  document.getElementById("over-title").textContent = lives <= 0 ? "Out of lives!" : "Time's up!";
+  document.getElementById("final").textContent = score;
+  document.getElementById("over-detail").textContent =
+    `${caught} hearts caught · survived ${survived}s`;
+  const sendBtn = document.getElementById("send-btn");
+  const againBtn = document.getElementById("again-btn");
+  if (duelId && inTelegram) {
+    sendBtn.classList.remove("hidden");
+    sendBtn.onclick = () => {
+      // Telegram closes the game and delivers this to the bot as a message from you.
+      tg.sendData(JSON.stringify({ duel: duelId, score, caught, survived }));
+    };
+  } else {
+    if (duelId) document.getElementById("over-detail").textContent += " · open from Telegram to submit";
+    againBtn.classList.remove("hidden");
+    againBtn.onclick = () => { document.getElementById("over").classList.add("hidden"); begin(); };
+  }
+  document.getElementById("over").classList.remove("hidden");
+}
+
+function begin() {
+  reset();
+  const cd = document.getElementById("countdown");
+  const num = document.getElementById("count");
+  cd.classList.remove("hidden");
+  let n = 3;
+  num.textContent = n;
+  const tick = setInterval(() => {
+    n -= 1;
+    if (n > 0) { num.textContent = n; return; }
+    clearInterval(tick);
+    cd.classList.add("hidden");
+    running = true;
+    requestAnimationFrame((ts) => { startAt = ts; requestAnimationFrame(frame); });
+  }, 700);
+}
+
+document.getElementById("start-btn").onclick = () => {
+  document.getElementById("start").classList.add("hidden");
+  begin();
+};
+reset();
+</script>
+</body>
+</html>
