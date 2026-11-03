@@ -36,6 +36,7 @@
 </head>
 <body>
 <canvas id="c"></canvas>
+<div id="ver" style="position:fixed;bottom:4px;right:8px;font-size:11px;opacity:.5">v3</div>
 <div id="hud"><span>❤️ <span id="score">0</span></span><span id="lives"></span><span>⏱ <span id="time">60</span></span></div>
 
 <div id="start" class="panel">
@@ -225,14 +226,19 @@ function endRound(elapsed) {
     `${caught} hearts caught · survived ${survived}s`;
   const sendBtn = document.getElementById("send-btn");
   const againBtn = document.getElementById("again-btn");
-  if (duelId && inTelegram) {
+  if (duelId) {
+    // Always offer Send in a duel: Telegram's launch data varies by how the game was opened,
+    // so only fall back to a hint if sendData actually isn't available.
     sendBtn.classList.remove("hidden");
     sendBtn.onclick = () => {
-      // Telegram closes the game and delivers this to the bot as a message from you.
-      tg.sendData(JSON.stringify({ duel: duelId, score, caught, survived }));
+      if (tg && tg.sendData && inTelegram) {
+        // Telegram closes the game and delivers this to the bot as a message from you.
+        tg.sendData(JSON.stringify({ duel: duelId, score, caught, survived }));
+      } else {
+        document.getElementById("over-detail").textContent = "Can't send from here - open the duel from the button in your chat with the bot.";
+      }
     };
   } else {
-    if (duelId) document.getElementById("over-detail").textContent += " · open from Telegram to submit";
     againBtn.classList.remove("hidden");
     againBtn.onclick = () => { document.getElementById("over").classList.add("hidden"); begin(); };
   }
