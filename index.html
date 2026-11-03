@@ -60,7 +60,9 @@
 <script>
 // ---- Telegram + mode -------------------------------------------------------
 const tg = window.Telegram && window.Telegram.WebApp;
-const inTelegram = !!(tg && tg.initData);
+// initData is empty when the game is opened from a reply-keyboard button (how duels launch),
+// so detect Telegram by platform instead - the SDK reports "unknown" in a normal browser.
+const inTelegram = !!(tg && tg.platform && tg.platform !== "unknown");
 if (tg) {
   tg.ready();
   tg.expand();
